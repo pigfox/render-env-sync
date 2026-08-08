@@ -58,6 +58,10 @@ type App struct {
 	Stdin  io.Reader
 	Getenv func(string) string
 
+	// Version is the build version, injected into main and passed through.
+	// Empty means an unstamped build and reports as DevVersion.
+	Version string
+
 	// NewAPI builds the API client. Defaults to a real Render client.
 	NewAPI func(cfg *config.Config, key secret.Secret) (API, error)
 }
@@ -75,6 +79,7 @@ Commands:
   push <target>        send local values to a service
   pull <target>        write service values into local .env files
   doctor               validate config and check each target resolves
+  version              print the build version
 
 Flags:
   --config <path>      configuration file (default $RENV_CONFIG or ~/.config/renv/config.yaml)
@@ -118,6 +123,9 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		err = a.cmdPull(ctx, rest)
 	case "doctor":
 		err = a.cmdDoctor(ctx, rest)
+	case "version", "--version", "-v":
+		fmt.Fprintln(a.Stdout, a.version())
+		return ExitOK
 	case "help", "-h", "--help":
 		fmt.Fprint(a.Stdout, usage)
 		return ExitOK
@@ -131,6 +139,17 @@ func (a *App) Run(ctx context.Context, args []string) int {
 		return ExitError
 	}
 	return code
+}
+
+// DevVersion is reported by a binary built without a version stamp.
+const DevVersion = "dev"
+
+// version reports the build version, or DevVersion when unstamped.
+func (a *App) version() string {
+	if a.Version == "" {
+		return DevVersion
+	}
+	return a.Version
 }
 
 // options are the flags shared across commands.

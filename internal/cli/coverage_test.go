@@ -126,6 +126,59 @@ func TestPermuteForms(t *testing.T) {
 	})
 }
 
+// TestVersion covers every spelling and both the stamped and unstamped cases.
+// The release workflow injects main.version with -X; if that plumbing breaks,
+// every published binary reports "dev" and there is no way to tell which build
+// a bug report came from.
+func TestVersion(t *testing.T) {
+	for _, arg := range []string{"version", "--version", "-v"} {
+		t.Run("stamped/"+arg, func(t *testing.T) {
+			h := newHarness(t, "")
+			h.app.Version = "v1.2.3"
+			if code := h.app.Run(context.Background(), []string{arg}); code != cli.ExitOK {
+				t.Fatalf("exit = %d", code)
+			}
+			if got := strings.TrimSpace(h.out()); got != "v1.2.3" {
+				t.Errorf("output = %q, want v1.2.3", got)
+			}
+		})
+
+		t.Run("unstamped/"+arg, func(t *testing.T) {
+			h := newHarness(t, "")
+			if code := h.app.Run(context.Background(), []string{arg}); code != cli.ExitOK {
+				t.Fatalf("exit = %d", code)
+			}
+			if got := strings.TrimSpace(h.out()); got != cli.DevVersion {
+				t.Errorf("output = %q, want %q", got, cli.DevVersion)
+			}
+		})
+	}
+}
+
+// TestVersionNeedsNoConfigOrCredential checks that asking a binary what it is
+// works on a machine with neither a config file nor an API key.
+func TestVersionNeedsNoConfigOrCredential(t *testing.T) {
+	h := newHarness(t, "")
+	h.app.Getenv = func(string) string { return "" }
+	h.app.Version = "v0.1.0"
+
+	if code := h.app.Run(context.Background(), []string{"version"}); code != cli.ExitOK {
+		t.Fatalf("exit = %d: %s", code, h.err())
+	}
+	if strings.TrimSpace(h.out()) != "v0.1.0" {
+		t.Errorf("output = %q", h.out())
+	}
+}
+
+// TestUsageListsVersion keeps the help text honest about the command existing.
+func TestUsageListsVersion(t *testing.T) {
+	h := newHarness(t, "")
+	h.app.Run(context.Background(), []string{"help"})
+	if !strings.Contains(h.out(), "version") {
+		t.Errorf("usage does not mention the version command:\n%s", h.out())
+	}
+}
+
 // TestFlagErrorPerCommand covers the flag-parsing failure on every command.
 func TestFlagErrorPerCommand(t *testing.T) {
 	for _, cmd := range []string{"init", "services", "status", "diff", "push", "pull", "doctor"} {

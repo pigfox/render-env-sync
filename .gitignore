@@ -1,6 +1,7 @@
 # Build output
 /renv
 /dist/
+/renv_*
 
 # Coverage
 *.out
