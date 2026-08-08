@@ -396,6 +396,12 @@ func TestPushDryRunWithPruneStillWritesNothing(t *testing.T) {
 // disagreement about it between two source files must not be able to fail
 // diff, status, push, pull and doctor alike — which is precisely what happened
 // the first time renv ran against a real estate.
+//
+// The excluded key is deliberately present on the REMOTE side too. An earlier
+// version of this test used a key absent from the service, and so passed while
+// the report was rendering excluded keys as "local: -" — claiming the key was
+// missing locally when it was present and filtered. The fixture has to carry
+// the key on both sides for the assertion to mean anything.
 func TestLocalOnlyKeyDoesNotBreakEveryCommand(t *testing.T) {
 	dir := t.TempDir()
 	first := filepath.Join(dir, "first.env")
@@ -427,14 +433,16 @@ projects:
 	}
 
 	h := newHarness(t, "")
-	h.api.serviceVars = vars("SAME_KEY", "v")
+	// The excluded key exists on the service as well, so a report that
+	// merely filtered the local side would still print a row for it.
+	h.api.serviceVars = vars("SAME_KEY", "v", "VENDOR_API_KEY", "on-the-service")
 
 	code := h.app.Run(context.Background(), []string{"diff", "--config", cfgPath})
 	if code != cli.ExitOK {
 		t.Fatalf("exit = %d, want success; stderr: %s", code, h.err())
 	}
 	if strings.Contains(h.out(), "VENDOR_API_KEY") {
-		t.Errorf("an excluded key appeared in output:\n%s", h.out())
+		t.Errorf("an excluded key appeared in output despite existing remotely:\n%s", h.out())
 	}
 	if strings.Contains(h.out()+h.err(), "defined differently") {
 		t.Errorf("an excluded key still produced a merge conflict:\n%s%s", h.out(), h.err())
@@ -463,6 +471,9 @@ func TestDenyPrefixAlsoSurvivesAConflict(t *testing.T) {
 	}
 
 	h := newHarness(t, "")
+	// Present remotely too, so a local-side-only filter would still show it.
+	h.api.serviceVars = vars("DEMO_DEPLOYER_PK", "0xccc")
+
 	if code := h.app.Run(context.Background(), []string{"diff", "--config", cfgPath}); code != cli.ExitOK {
 		t.Fatalf("exit = %d: %s", code, h.err())
 	}

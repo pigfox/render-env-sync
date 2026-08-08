@@ -134,16 +134,24 @@ func TestCompareStatuses(t *testing.T) {
 	got := delta.Compare(local, remote, m)
 
 	want := map[string]delta.Status{
-		"SAME_KEY":         delta.StatusSame,
-		"DIFF_KEY":         delta.StatusDiffers,
-		"LOCAL_ONLY_KEY":   delta.StatusLocalOnly,
-		"REMOTE_ONLY_KEY":  delta.StatusRemoteOnly,
-		"SHADOWED":         delta.StatusShadow,
-		"NOT_IN_MANIFEST":  delta.StatusUnmanaged,
-		"DEMO_DEPLOYER_PK": delta.StatusUnmanaged,
+		"SAME_KEY":        delta.StatusSame,
+		"DIFF_KEY":        delta.StatusDiffers,
+		"LOCAL_ONLY_KEY":  delta.StatusLocalOnly,
+		"REMOTE_ONLY_KEY": delta.StatusRemoteOnly,
+		"SHADOWED":        delta.StatusShadow,
+		"NOT_IN_MANIFEST": delta.StatusUnmanaged,
 	}
 	if len(got) != len(want) {
 		t.Fatalf("got %d entries, want %d", len(got), len(want))
+	}
+
+	// A denied key is omitted entirely, not reported as unmanaged. Reporting
+	// it would have to claim something about its local side, and the local
+	// side was filtered out before the comparison ran.
+	for _, e := range got {
+		if e.Key == "DEMO_DEPLOYER_PK" {
+			t.Errorf("a denied key appeared in the comparison as %q", e.Status)
+		}
 	}
 	for key, status := range want {
 		if e := entryFor(t, got, key); e.Status != status {

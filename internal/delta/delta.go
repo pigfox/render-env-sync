@@ -8,6 +8,10 @@
 // that reads only service-level variables will keep re-pushing keys the group
 // already supplies, and will report a group-supplied key as missing.
 //
+// A key blocked by DenyPrefixes or LocalOnly is absent from the comparison
+// altogether, not merely unmanaged: it is filtered from every source file
+// before the merge, so including it would report it as missing locally.
+//
 // The set of local keys that belong on a service is much smaller than the set
 // of local keys. Recon measured 44 local keys against 35 remote ones with only
 // 18 in common: the remainder are local-only signing material on one side and
@@ -53,8 +57,9 @@ const (
 	// group. The service value wins, so the group's copy is inert while
 	// still appearing correct in the dashboard.
 	StatusShadow Status = "SHADOW"
-	// StatusUnmanaged means the key is not in the allowlist, or is blocked.
-	// renv reports it and touches it in neither direction.
+	// StatusUnmanaged means the key is not in the allowlist. renv reports it
+	// so that an allowlist can be built from a real diff, but never writes
+	// it. Keys that are blocked outright do not appear at all.
 	StatusUnmanaged Status = "UNMANAGED"
 )
 
@@ -179,6 +184,15 @@ func Compare(local Set, remote map[string]Resolved, m Manifest) []Entry {
 
 	out := make([]Entry, 0, len(sorted))
 	for _, k := range sorted {
+		// A blocked key is excluded in both directions, so it is omitted
+		// from the comparison entirely rather than reported as unmanaged.
+		// Reporting it would state something false: the local side is
+		// filtered before the merge, so the key would render as absent
+		// locally when it is in fact present and deliberately excluded.
+		if m.Blocked(k) {
+			continue
+		}
+
 		lv, hasLocal := local[k]
 		rv, hasRemote := remote[k]
 
