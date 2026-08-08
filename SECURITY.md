@@ -4,10 +4,34 @@
 
 | Version | Supported | Notes |
 | --- | --- | --- |
-| v0.1.1 and later | ✅ | Current. |
+| v0.1.2 and later | ✅ | Current. |
+| v0.1.1 | ❌ | Superseded. See [Known issues](#known-issues). |
 | v0.1.0 | ❌ | Superseded. See [Known issues](#known-issues). |
 
 ## Known issues
+
+### v0.1.1 — excluded keys reported as absent locally
+
+**Fixed in v0.1.2. This is a correctness bug, not a disclosure one.**
+
+Keys excluded by `deny_prefixes` or `local_only` were rendered with an empty
+local column, so a blocked key that also exists on the service read as absent
+locally when it was present. Blocked keys are omitted from the report entirely
+in v0.1.2. Not a disclosure issue — the values shown were correct; the
+local/remote presence was not.
+
+No credential was exposed and no value was misreported. What was wrong was the
+claim about where a key existed, in a report used to decide what to push and
+what to delete — so a reader could reasonably have concluded a key was missing
+from their local files and added it, or that a service held a key their files
+did not.
+
+The defect only affected blocked keys that the service *also* carried: a
+blocked key absent remotely was omitted for the ordinary reason and looked
+correct. It was introduced alongside the v0.1.1 fix that filters blocked keys
+out of every source file before the merge, which addressed a blocked key being
+able to fail every command through a conflict between two files renv would
+never read or write.
 
 ### v0.1.0 — `.env` parser printed raw line content in syntax errors
 
