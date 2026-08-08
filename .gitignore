@@ -1,0 +1,14 @@
+# Build output
+/renv
+/dist/
+
+# Coverage
+*.out
+coverage.html
+
+# Local configuration and anything resembling a credential file
+config.yaml
+.env
+.env.*
+*.env
+*.bak.*
