@@ -61,6 +61,10 @@ type Environment struct {
 // Target is the "project/environment" string that names this environment.
 func (e *Environment) Target() string { return e.Project + "/" + e.Name }
 
+// RemoteOnly reports an environment with no local source files. Such a target
+// can be inspected but not synchronised in either direction.
+func (e *Environment) RemoteOnly() bool { return len(e.EnvFiles) == 0 }
+
 // Project is a named group of environments.
 type Project struct {
 	Name         string
@@ -146,7 +150,7 @@ func Parse(src []byte) (*Config, error) {
 	if n, ok := root.child("version"); ok {
 		v, err := strconv.Atoi(n.str)
 		if err != nil {
-			return nil, errf("version", "expected an integer, got %q", n.str)
+			return nil, errf("version", "expected an integer")
 		}
 		if v != SchemaVersion {
 			return nil, errf("version", "unsupported schema version %d; this build understands %d", v, SchemaVersion)
@@ -199,7 +203,7 @@ func (c *Config) loadDefaults(n *node) error {
 	if v, ok := n.child("page_limit"); ok && v.str != "" {
 		limit, err := strconv.Atoi(v.str)
 		if err != nil {
-			return errf("defaults.page_limit", "expected an integer, got %q", v.str)
+			return errf("defaults.page_limit", "expected an integer")
 		}
 		if limit < 1 || limit > render.MaxPageLimit {
 			return errf("defaults.page_limit",
@@ -259,39 +263,40 @@ func loadEnvironment(project, name string, n *node) (*Environment, error) {
 	if v, ok := n.child("prod"); ok {
 		b, err := parseBool(v.str)
 		if err != nil {
-			return nil, errf(path+".prod", "expected true or false, got %q", v.str)
+			return nil, errf(path+".prod", "expected true or false")
 		}
 		e.Prod = b
 	}
 
-	files, ok := n.child("env_files")
-	if !ok {
-		return nil, errf(path+".env_files", "at least one env file is required")
-	}
-	list, err := stringList(files, path+".env_files")
-	if err != nil {
-		return nil, err
-	}
-	if len(list) == 0 {
-		return nil, errf(path+".env_files", "at least one env file is required")
-	}
-	for _, f := range list {
-		expanded, err := expandPath(f)
+	// env_files may be absent or empty. Such an environment is remote-only:
+	// diff reports everything the service has as REMOTE_ONLY, and push and
+	// pull refuse, because there is no local side to read from or write to.
+	if files, ok := n.child("env_files"); ok {
+		list, err := stringList(files, path+".env_files")
 		if err != nil {
-			return nil, errf(path+".env_files", "%v", err)
+			return nil, err
 		}
-		e.EnvFiles = append(e.EnvFiles, expanded)
+		for _, f := range list {
+			expanded, err := expandPath(f)
+			if err != nil {
+				return nil, errf(path+".env_files", "%v", err)
+			}
+			e.EnvFiles = append(e.EnvFiles, expanded)
+		}
 	}
 
 	if manage, ok := n.child("manage"); ok {
-		if manage.kind != mappingNode {
+		// A bare "manage:" is an explicit empty allowlist, which is the
+		// natural way to write "nothing is managed yet".
+		empty := manage.kind == scalarNode && manage.str == ""
+		if !empty && manage.kind != mappingNode {
 			return nil, errf(path+".manage", "expected a mapping of key to home (service or group)")
 		}
 		for _, key := range manage.keys {
 			home := delta.Home(manage.m[key].str)
 			if !home.Valid() {
 				return nil, errf(path+".manage."+key,
-					"home must be %q or %q, got %q", delta.HomeService, delta.HomeGroup, home)
+					"home must be %q or %q", delta.HomeService, delta.HomeGroup)
 			}
 			e.Manage[key] = home
 		}

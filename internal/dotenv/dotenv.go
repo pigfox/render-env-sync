@@ -13,8 +13,12 @@
 //     Last-wins is a guess, and PF-S80 recon found a real case where the
 //     stale value came first.
 //   - A line that is neither blank, comment, nor assignment is an error.
-//     Recon measured zero such lines across the estate, so tolerating them
-//     would only ever mask a corrupted file.
+//
+// Errors from this package name a file, a line, a key, or a fingerprint. They
+// never quote the line. A malformed line is by definition bytes the parser
+// could not classify, and in the case that motivated this rule the bytes were
+// a live API key: echoing them into an error string put that key on a
+// terminal, into shell history, and into a bug report.
 package dotenv
 
 import (
@@ -47,6 +51,12 @@ type Line struct {
 	Text  string
 	Key   string
 	Value secret.Secret
+
+	// Indent is the leading whitespace of an assignment, and Export records
+	// a leading "export ". Both are kept so that a file using either style
+	// writes back byte-identically.
+	Indent string
+	Export bool
 }
 
 // File is a parsed .env file.
@@ -58,14 +68,32 @@ type File struct {
 	trailingNewline bool
 }
 
+// SyntaxProblem classifies why a line could not be parsed.
+type SyntaxProblem string
+
+const (
+	// ProblemNoSeparator means the line has no "=" at all.
+	ProblemNoSeparator SyntaxProblem = "not a comment or KEY=VALUE assignment (no '=' separator)"
+	// ProblemEmptyKey means the line begins with "=".
+	ProblemEmptyKey SyntaxProblem = "empty key before '='"
+	// ProblemInvalidKey means the text before "=" is not a shell identifier.
+	ProblemInvalidKey SyntaxProblem = "invalid characters in key; expected letters, digits and underscore"
+)
+
 // SyntaxError reports a line that is not blank, a comment, or an assignment.
+//
+// It carries no field holding the line, and none naming a key either. A syntax
+// error is exactly the case where no valid identifier could be parsed, so the
+// candidate key is itself untrusted bytes — for a stray base64 or token line
+// it would be part of the secret. Where a key *can* be parsed and the value is
+// the problem, [MultilineValueError] names it.
 type SyntaxError struct {
-	Line int
-	Text string
+	Line    int
+	Problem SyntaxProblem
 }
 
 func (e *SyntaxError) Error() string {
-	return fmt.Sprintf("line %d: not a comment or KEY=VALUE assignment: %q", e.Line, e.Text)
+	return fmt.Sprintf("line %d: %s", e.Line, e.Problem)
 }
 
 // MultilineValueError reports a value whose opening quote is never closed on
@@ -139,9 +167,25 @@ func Parse(src []byte) (*File, error) {
 			continue
 		}
 
-		key, rawValue, ok := strings.Cut(rawLine, "=")
-		if !ok || !validKey(key) {
-			return nil, &SyntaxError{Line: lineNo, Text: rawLine}
+		// Leading whitespace and an "export " prefix are both accepted and
+		// both recorded, so that a file written in either style survives a
+		// round trip unchanged.
+		body := strings.TrimLeft(rawLine, " \t")
+		indent := rawLine[:len(rawLine)-len(body)]
+		export := false
+		if rest, found := strings.CutPrefix(body, "export "); found {
+			export = true
+			body = strings.TrimLeft(rest, " \t")
+		}
+
+		key, rawValue, ok := strings.Cut(body, "=")
+		switch {
+		case !ok:
+			return nil, &SyntaxError{Line: lineNo, Problem: ProblemNoSeparator}
+		case key == "":
+			return nil, &SyntaxError{Line: lineNo, Problem: ProblemEmptyKey}
+		case !validKey(key):
+			return nil, &SyntaxError{Line: lineNo, Problem: ProblemInvalidKey}
 		}
 
 		value, err := unquote(rawValue)
@@ -159,7 +203,9 @@ func Parse(src []byte) (*File, error) {
 			first[key] = seen{line: lineNo, fp: v.Fingerprint()}
 		}
 
-		f.Lines = append(f.Lines, Line{Kind: KindAssign, Key: key, Value: v})
+		f.Lines = append(f.Lines, Line{
+			Kind: KindAssign, Key: key, Value: v, Indent: indent, Export: export,
+		})
 	}
 	return f, nil
 }
@@ -276,6 +322,10 @@ func (f *File) Bytes() ([]byte, error) {
 		switch l.Kind {
 		case KindAssign:
 			plain := secret.Reveal(l.Value)
+			b.WriteString(l.Indent)
+			if l.Export {
+				b.WriteString("export ")
+			}
 			if needsQuote(plain) {
 				if strings.Contains(plain, `"`) {
 					return nil, &UnquotableValueError{Key: l.Key}
@@ -416,18 +466,25 @@ func (e *ConflictError) Error() string {
 
 // Merge flattens several files into one key set.
 //
+// skip, when non-nil, drops a key from every file before comparison. Keys the
+// manifest blocks in both directions must not be able to fail a command via a
+// conflict between two files neither of which renv would ever read or write.
+//
 // A key repeated across files with the same value is fine — the estate has
 // complementary halves that legitimately overlap. A key repeated with
 // different values is a [ConflictError] rather than a silent last-wins,
 // because recon found exactly one such case and the correct survivor was the
 // value in the later file, which no fixed precedence rule could have known.
-func Merge(sources []Source) (map[string]secret.Secret, error) {
+func Merge(sources []Source, skip func(key string) bool) (map[string]secret.Secret, error) {
 	out := map[string]secret.Secret{}
 	origin := map[string]string{}
 
 	for _, src := range sources {
 		for _, l := range src.File.Lines {
 			if l.Kind != KindAssign {
+				continue
+			}
+			if skip != nil && skip(l.Key) {
 				continue
 			}
 			if prev, ok := out[l.Key]; ok && !prev.Equal(l.Value) {

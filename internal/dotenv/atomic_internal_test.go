@@ -111,3 +111,21 @@ func TestWriteAtomicCreateTempError(t *testing.T) {
 		t.Fatalf("err = %v, want %v", err, want)
 	}
 }
+
+// TestValidKey pins the identifier rule directly. Parse classifies an empty
+// key separately so it never reaches validKey with "", but the helper is the
+// definition of what renv accepts as a key and its contract is worth stating.
+func TestValidKey(t *testing.T) {
+	valid := []string{"A", "_", "_A", "KEY", "KEY_1", "k9", "DD_SLOT0_MODEL_ID"}
+	for _, s := range valid {
+		if !validKey(s) {
+			t.Errorf("validKey(%q) = false, want true", s)
+		}
+	}
+	invalid := []string{"", "1KEY", "9", "BAD-KEY", "BAD KEY", "KEY.SUB", "KEY=X", "é"}
+	for _, s := range invalid {
+		if validKey(s) {
+			t.Errorf("validKey(%q) = true, want false", s)
+		}
+	}
+}

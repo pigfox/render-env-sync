@@ -160,7 +160,10 @@ func (p *parser) parseMapping(indent int) (*node, error) {
 
 		key, rest, ok := splitKey(l.text)
 		if !ok {
-			return nil, &yamlError{Line: l.num, Msg: fmt.Sprintf("expected \"key: value\", got %q", l.text)}
+			// The line is not quoted back: a rejected line is unvalidated
+			// content, and an error message is the wrong place to discover
+			// what it held.
+			return nil, &yamlError{Line: l.num, Msg: `expected "key: value"`}
 		}
 		if _, dup := n.m[key]; dup {
 			return nil, &yamlError{Line: l.num, Msg: fmt.Sprintf("duplicate key %q", key)}

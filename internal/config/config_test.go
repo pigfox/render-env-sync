@@ -193,14 +193,13 @@ func TestValidationErrors(t *testing.T) {
 		{"no environments", "version: 1\nprojects:\n  p:\n    environments:\n", "at least one environment"},
 		{"missing environments key", "version: 1\nprojects:\n  p:\n    other: x\n", "at least one environment"},
 		{"no service", "version: 1\nprojects:\n  p:\n    environments:\n      e:\n        env_files: /a\n", "service id is required"},
-		{"no env_files", "version: 1\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-x\n", "env file is required"},
-		{"empty env_files", "version: 1\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-x\n        env_files:\n", "env file is required"},
 		{"bad version", "version: nine\n", "expected an integer"},
 		{"unsupported version", "version: 2\n", "unsupported schema version"},
 		{"bad page limit", "version: 1\ndefaults:\n  page_limit: many\n", "expected an integer"},
 		{"bad prod flag", "version: 1\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-x\n        prod: maybe\n        env_files: /a\n", "expected true or false"},
 		{"bad home", "version: 1\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-x\n        env_files: /a\n        manage:\n          K: elsewhere\n", "home must be"},
 		{"manage not a mapping", "version: 1\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-x\n        env_files: /a\n        manage:\n          - K\n", "mapping of key to home"},
+		{"manage scalar", "version: 1\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-x\n        env_files: /a\n        manage: nonsense\n", "mapping of key to home"},
 		{"defaults not a mapping", "version: 1\ndefaults:\n  - a\n", "expected a mapping"},
 		{"project not a mapping", "version: 1\nprojects:\n  p:\n    - a\n", "expected a mapping"},
 		{"environment not a mapping", "version: 1\nprojects:\n  p:\n    environments:\n      e:\n        - a\n", "expected a mapping"},
@@ -463,5 +462,52 @@ func TestEnvFilePathExpansionFailure(t *testing.T) {
 	}
 	if !strings.Contains(err.Error(), "env_files") {
 		t.Errorf("error should name the field: %v", err)
+	}
+}
+
+// TestRemoteOnlyEnvironment covers an environment with no local source. Such a
+// target exists to be inspected: diff can report what the service holds even
+// when nothing local corresponds to it.
+func TestRemoteOnlyEnvironment(t *testing.T) {
+	for _, src := range []string{
+		"version: 1\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-x\n",
+		"version: 1\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-x\n        env_files:\n",
+	} {
+		cfg := parse(t, src)
+		e, err := cfg.Resolve("p/e")
+		if err != nil {
+			t.Fatalf("Resolve: %v", err)
+		}
+		if !e.RemoteOnly() {
+			t.Errorf("environment with no env_files should be remote-only")
+		}
+		if len(e.EnvFiles) != 0 {
+			t.Errorf("EnvFiles = %v", e.EnvFiles)
+		}
+	}
+
+	cfg := parse(t, minimal)
+	e, err := cfg.Resolve("proj/default")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if e.RemoteOnly() {
+		t.Error("environment with an env_file reported remote-only")
+	}
+}
+
+// TestBareManageIsAnEmptyAllowlist covers the natural way to write "nothing is
+// managed yet" while building the allowlist from a real diff.
+func TestBareManageIsAnEmptyAllowlist(t *testing.T) {
+	cfg := parse(t, "version: 1\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-x\n        env_files: /a\n        manage:\n        local_only:\n          - X\n")
+	e, err := cfg.Resolve("p/e")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(e.Manage) != 0 {
+		t.Errorf("Manage = %v, want empty", e.Manage)
+	}
+	if len(e.LocalOnly) != 1 {
+		t.Errorf("local_only after a bare manage = %v", e.LocalOnly)
 	}
 }

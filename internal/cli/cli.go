@@ -324,7 +324,7 @@ type resolution struct {
 
 // resolve loads local files, fetches remote state, and classifies.
 func (a *App) resolve(ctx context.Context, cfg *config.Config, api API, env *config.Environment) (*resolution, error) {
-	sources, local, err := loadLocal(env)
+	sources, local, err := loadLocal(env, cfg.Manifest(env))
 	if err != nil {
 		return nil, err
 	}
@@ -360,7 +360,12 @@ func (a *App) resolve(ctx context.Context, cfg *config.Config, api API, env *con
 
 // loadLocal parses and merges an environment's source files, returning both
 // the parsed files and the merged view.
-func loadLocal(env *config.Environment) ([]dotenv.Source, delta.Set, error) {
+//
+// The manifest filters keys out of every file before the merge. A key blocked
+// in both directions must not be able to fail every command through a conflict
+// between two files that renv would never read from or write to — which is
+// exactly what happened the first time this ran against a real estate.
+func loadLocal(env *config.Environment, m delta.Manifest) ([]dotenv.Source, delta.Set, error) {
 	sources := make([]dotenv.Source, 0, len(env.EnvFiles))
 	for _, path := range env.EnvFiles {
 		f, err := dotenv.ParseFile(path)
@@ -369,7 +374,7 @@ func loadLocal(env *config.Environment) ([]dotenv.Source, delta.Set, error) {
 		}
 		sources = append(sources, dotenv.Source{Path: path, File: f})
 	}
-	merged, err := dotenv.Merge(sources)
+	merged, err := dotenv.Merge(sources, m.Blocked)
 	if err != nil {
 		return nil, nil, err
 	}
@@ -513,6 +518,9 @@ func (a *App) cmdPush(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	if env.RemoteOnly() {
+		return fmt.Errorf("%s has no env_files: there is no local source to push from", env.Target())
+	}
 	if env.Prod && !o.yesProd {
 		return fmt.Errorf("%s is marked prod; pass --yes-prod to write to it", env.Target())
 	}
@@ -610,6 +618,9 @@ func (a *App) cmdPull(ctx context.Context, args []string) error {
 	env, err := cfg.Resolve(rest[0])
 	if err != nil {
 		return err
+	}
+	if env.RemoteOnly() {
+		return fmt.Errorf("%s has no env_files: there is nowhere to write pulled values", env.Target())
 	}
 	api, err := a.client(cfg)
 	if err != nil {
@@ -781,7 +792,7 @@ func (a *App) cmdDoctor(ctx context.Context, args []string) error {
 		}
 
 		files := "ok"
-		if _, _, err := loadLocal(env); err != nil {
+		if _, _, err := loadLocal(env, cfg.Manifest(env)); err != nil {
 			files = "ERROR"
 			problems++
 		}

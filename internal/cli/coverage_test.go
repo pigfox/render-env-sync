@@ -390,3 +390,146 @@ func TestPushDryRunWithPruneStillWritesNothing(t *testing.T) {
 		t.Errorf("output = %q", h.out())
 	}
 }
+
+// TestLocalOnlyKeyDoesNotBreakEveryCommand is named for the failure it
+// prevents. A key listed in local_only is excluded in both directions, so a
+// disagreement about it between two source files must not be able to fail
+// diff, status, push, pull and doctor alike — which is precisely what happened
+// the first time renv ran against a real estate.
+func TestLocalOnlyKeyDoesNotBreakEveryCommand(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "first.env")
+	second := filepath.Join(dir, "second.env")
+	if err := os.WriteFile(first, []byte("VENDOR_API_KEY=stale\nSAME_KEY=v\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("VENDOR_API_KEY=current\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := fmt.Sprintf(`
+version: 1
+projects:
+  proj:
+    environments:
+      default:
+        service: srv-TEST0000
+        env_files:
+          - %s
+          - %s
+        manage:
+          SAME_KEY: service
+        local_only:
+          - VENDOR_API_KEY
+`, first, second)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, "")
+	h.api.serviceVars = vars("SAME_KEY", "v")
+
+	code := h.app.Run(context.Background(), []string{"diff", "--config", cfgPath})
+	if code != cli.ExitOK {
+		t.Fatalf("exit = %d, want success; stderr: %s", code, h.err())
+	}
+	if strings.Contains(h.out(), "VENDOR_API_KEY") {
+		t.Errorf("an excluded key appeared in output:\n%s", h.out())
+	}
+	if strings.Contains(h.out()+h.err(), "defined differently") {
+		t.Errorf("an excluded key still produced a merge conflict:\n%s%s", h.out(), h.err())
+	}
+	if !strings.Contains(h.out(), "SAME") {
+		t.Errorf("the managed key was not compared:\n%s", h.out())
+	}
+}
+
+// TestDenyPrefixAlsoSurvivesAConflict covers the same rule for the global deny
+// list rather than a per-environment local_only entry.
+func TestDenyPrefixAlsoSurvivesAConflict(t *testing.T) {
+	dir := t.TempDir()
+	first := filepath.Join(dir, "a.env")
+	second := filepath.Join(dir, "b.env")
+	if err := os.WriteFile(first, []byte("DEMO_DEPLOYER_PK=0xaaa\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(second, []byte("DEMO_DEPLOYER_PK=0xbbb\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := fmt.Sprintf("version: 1\ndeny_prefixes:\n  - DEMO_*\nprojects:\n  p:\n    environments:\n      e:\n        service: srv-TEST0000\n        env_files:\n          - %s\n          - %s\n", first, second)
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	h := newHarness(t, "")
+	if code := h.app.Run(context.Background(), []string{"diff", "--config", cfgPath}); code != cli.ExitOK {
+		t.Fatalf("exit = %d: %s", code, h.err())
+	}
+	if strings.Contains(h.out(), "DEMO_DEPLOYER_PK") {
+		t.Errorf("a denied key appeared in output:\n%s", h.out())
+	}
+}
+
+// remoteOnlyHarness builds a target with no env_files.
+func remoteOnlyHarness(t *testing.T) (*harness, string) {
+	t.Helper()
+	dir := t.TempDir()
+	cfgPath := filepath.Join(dir, "config.yaml")
+	cfg := "version: 1\nprojects:\n  mv:\n    environments:\n      dev:\n        service: srv-TEST0000\n        manage:\n          REMOTE_KEY: service\n"
+	if err := os.WriteFile(cfgPath, []byte(cfg), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	h := newHarness(t, "")
+	h.api.serviceVars = vars("REMOTE_KEY", "only-on-render")
+	return h, cfgPath
+}
+
+// TestRemoteOnlyTargetDiffs covers an environment with no confirmed source
+// file: it can still be inspected, and everything the service holds reports as
+// REMOTE_ONLY.
+func TestRemoteOnlyTargetDiffs(t *testing.T) {
+	h, cfgPath := remoteOnlyHarness(t)
+	code := h.app.Run(context.Background(), []string{"diff", "--config", cfgPath})
+	if code != cli.ExitDrift {
+		t.Fatalf("exit = %d, want drift; stderr: %s", code, h.err())
+	}
+	if !strings.Contains(h.out(), "REMOTE_ONLY") {
+		t.Errorf("output = %q", h.out())
+	}
+}
+
+// TestRemoteOnlyTargetRefusesPushAndPull covers the other half: there is no
+// local side, so synchronising in either direction is meaningless and must say
+// so rather than panic or silently do nothing.
+func TestRemoteOnlyTargetRefusesPushAndPull(t *testing.T) {
+	for _, cmd := range []string{"push", "pull"} {
+		t.Run(cmd, func(t *testing.T) {
+			h, cfgPath := remoteOnlyHarness(t)
+			code := h.app.Run(context.Background(), []string{cmd, "--config", cfgPath, "mv/dev", "--apply"})
+			if code != cli.ExitError {
+				t.Fatalf("exit = %d, want a refusal", code)
+			}
+			if !strings.Contains(h.err(), "no env_files") {
+				t.Errorf("stderr = %q", h.err())
+			}
+			if len(h.api.puts) != 0 || len(h.api.deletes) != 0 {
+				t.Errorf("a remote-only target was written to: puts=%v deletes=%v", h.api.puts, h.api.deletes)
+			}
+		})
+	}
+}
+
+// TestExportStyleSourceFileIsAccepted covers the shell-style .env that the
+// parser originally rejected outright.
+func TestExportStyleSourceFileIsAccepted(t *testing.T) {
+	h := newHarness(t, "export SAME_KEY=v\nexport DIFF_KEY=local\n")
+	h.api.serviceVars = vars("SAME_KEY", "v", "DIFF_KEY", "remote")
+
+	if code := h.run("diff"); code != cli.ExitDrift {
+		t.Fatalf("exit = %d: %s", code, h.err())
+	}
+	if !strings.Contains(h.out(), "SAME") || !strings.Contains(h.out(), "DIFFERS") {
+		t.Errorf("output = %q", h.out())
+	}
+}

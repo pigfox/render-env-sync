@@ -23,6 +23,7 @@ QUOTED_BECAUSE_SPACE="two words"
 QUOTED_BECAUSE_HASH="has#hash"
 URL=https://example.com/path?a=b
 NUMERIC=42
+KEY_WITH_9_DIGITS=ok
 
 # trailing comment block
 LAST=end
@@ -155,23 +156,107 @@ func TestDuplicateKeyWithIdenticalValuesIsAllowed(t *testing.T) {
 	}
 }
 
-func TestSyntaxErrors(t *testing.T) {
-	for _, src := range []string{
-		"export FOO=bar\n",
-		"not an assignment\n",
-		"1BAD=x\n",
-		"=novalue\n",
-		"BAD-KEY=x\n",
-	} {
-		_, err := dotenv.Parse([]byte(src))
+func TestSyntaxErrorsAreClassified(t *testing.T) {
+	tests := []struct {
+		src  string
+		want dotenv.SyntaxProblem
+	}{
+		{"not an assignment\n", dotenv.ProblemNoSeparator},
+		{"JUST_A_WORD\n", dotenv.ProblemNoSeparator},
+		{"=novalue\n", dotenv.ProblemEmptyKey},
+		{"1BAD=x\n", dotenv.ProblemInvalidKey},
+		{"BAD-KEY=x\n", dotenv.ProblemInvalidKey},
+		{"FOO BAR=x\n", dotenv.ProblemInvalidKey},
+	}
+	for _, tc := range tests {
+		_, err := dotenv.Parse([]byte(tc.src))
 		var se *dotenv.SyntaxError
 		if !errors.As(err, &se) {
-			t.Errorf("Parse(%q) error = %v, want SyntaxError", src, err)
+			t.Errorf("Parse(%q) error = %v, want SyntaxError", tc.src, err)
 			continue
 		}
-		if !strings.Contains(se.Error(), "KEY=VALUE") {
+		if se.Problem != tc.want {
+			t.Errorf("Parse(%q) problem = %q, want %q", tc.src, se.Problem, tc.want)
+		}
+		if se.Line != 1 {
+			t.Errorf("Parse(%q) line = %d, want 1", tc.src, se.Line)
+		}
+		if !strings.Contains(se.Error(), string(tc.want)) {
 			t.Errorf("message = %q", se.Error())
 		}
+	}
+}
+
+// TestExportPrefixRoundTrips covers the shell-style form that a real .env file
+// turned out to use. It was originally rejected on the strength of a recon
+// sweep that measured zero such lines — in one project's file, which did not
+// generalise.
+func TestExportPrefixRoundTrips(t *testing.T) {
+	const src = "export PLAIN=value\nexport QUOTED=\"two words\"\nNORMAL=x\n  INDENTED=y\n  export BOTH=z\n"
+
+	f, err := dotenv.Parse([]byte(src))
+	if err != nil {
+		t.Fatalf("Parse: %v", err)
+	}
+	for _, tc := range []struct{ key, want string }{
+		{"PLAIN", "value"}, {"QUOTED", "two words"},
+		{"NORMAL", "x"}, {"INDENTED", "y"}, {"BOTH", "z"},
+	} {
+		v, ok := f.Get(tc.key)
+		if !ok {
+			t.Fatalf("%s missing", tc.key)
+		}
+		if got := secret.Reveal(v); got != tc.want {
+			t.Errorf("%s = %q, want %q", tc.key, got, tc.want)
+		}
+	}
+
+	got, err := f.Bytes()
+	if err != nil {
+		t.Fatalf("Bytes: %v", err)
+	}
+	if string(got) != src {
+		t.Fatalf("round trip differs:\n--- got ---\n%s\n--- want ---\n%s", got, src)
+	}
+}
+
+// TestExportPreservedOnUpdate checks that rewriting a value keeps the export
+// prefix, so pulling into a shell-style file does not reformat it.
+func TestExportPreservedOnUpdate(t *testing.T) {
+	f, err := dotenv.Parse([]byte("export KEY=old\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	f.Set("KEY", secret.New("new"))
+	got, err := f.Bytes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(got) != "export KEY=new\n" {
+		t.Fatalf("Bytes = %q", got)
+	}
+}
+
+func TestMergeSkipsBlockedKeys(t *testing.T) {
+	a, err := dotenv.Parse([]byte("BLOCKED=one\nKEEP=same\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	b, err := dotenv.Parse([]byte("BLOCKED=two\nKEEP=same\n"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	skip := func(k string) bool { return k == "BLOCKED" }
+
+	got, err := dotenv.Merge([]dotenv.Source{{Path: "a", File: a}, {Path: "b", File: b}}, skip)
+	if err != nil {
+		t.Fatalf("a blocked key still produced a conflict: %v", err)
+	}
+	if _, present := got["BLOCKED"]; present {
+		t.Error("blocked key survived the merge")
+	}
+	if len(got) != 1 {
+		t.Fatalf("merged %v, want only KEEP", got)
 	}
 }
 
@@ -464,7 +549,7 @@ func TestMerge(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	got, err := dotenv.Merge([]dotenv.Source{{Path: "a", File: a}, {Path: "b", File: b}})
+	got, err := dotenv.Merge([]dotenv.Source{{Path: "a", File: a}, {Path: "b", File: b}}, nil)
 	if err != nil {
 		t.Fatalf("Merge: %v", err)
 	}
@@ -491,7 +576,7 @@ func TestMergeConflict(t *testing.T) {
 	_, err = dotenv.Merge([]dotenv.Source{
 		{Path: "app/.env", File: a},
 		{Path: "app-extra/.env", File: b},
-	})
+	}, nil)
 	var ce *dotenv.ConflictError
 	if !errors.As(err, &ce) {
 		t.Fatalf("error = %v, want ConflictError", err)
